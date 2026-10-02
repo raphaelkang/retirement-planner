@@ -1057,6 +1057,9 @@ input,select,button{font-family:inherit}
 .ba-name b{display:block;color:var(--ink);font-size:1rem}
 @media(max-width:820px){.ba-card{grid-template-columns:1fr}.ba-text{padding:1.4rem}.ba-a{font-size:1.08rem}}
 @media print{.ba-card{grid-template-columns:1.15fr .85fr;break-inside:avoid;box-shadow:none}.ba-text{padding:1.3rem 1.5rem}.ba-a{font-size:1rem}.ba-q{font-size:1rem}.ba-tag{font-size:1.05rem}}
+.rpt-disclaimer{margin-top:1.6rem;padding-top:.9rem;border-top:1px solid var(--line);font-size:.74rem;line-height:1.55;color:var(--ink45)}
+.rpt-disclaimer b{color:var(--ink70)}
+@media print{.rpt-disclaimer{break-inside:avoid;font-size:7.5pt}}
 .eca-root{
   --bg:#F5F8F6; --surface:#FFFFFF; --ink:#15201C; --muted:#56655F; --line:#DCE5E0;
   --brand:#1F4E45; --on-brand:#FFFFFF; --panel:#1F4E45; --on-panel:#FFFFFF;
@@ -1439,13 +1442,13 @@ function cpfProject(p){
   const [BRS,FRS,ERS] = cpfRS(byear+55);
   let oa=Math.max(0,p.oa||0), ma=Math.max(0,p.ma||0);
   let sa=0, ra=0, ra55eq=0, formed=age0>=55;
-  if(formed){ ra=Math.max(0,p.sa||0); ra55eq = ra/Math.pow(1.04,age0-55); } else sa=Math.max(0,p.sa||0);
+  if(formed){ ra=Math.max(0,p.sa||0); ra55eq = p.ra55est!=null ? p.ra55est : ra/Math.pow(1.04,age0-55); } else sa=Math.max(0,p.sa||0);
   const rows=[], miles=[]; let at55=null, flagOASA=false, flagSA=false, fromMA={toSA:0,toRA:0,toOA:0};
   let housingPaid=0;
   for(let a=age0; a<=endAge; a++){
     const year=byear+a;
     if(a===55 && !formed){
-      const avail=sa+oa, raAmt=Math.min(avail,FRS);
+      const avail=sa+oa, raAmt=Math.min(avail,pledge?BRS:FRS);
       const saB=sa, oaB=oa;
       if(sa>=raAmt){ oa+=sa-raAmt; sa=0; } else { oa-=(raAmt-sa); sa=0; }
       ra=raAmt; ra55eq=raAmt; formed=true;
@@ -1508,6 +1511,16 @@ function cpfProject(p){
   return {rows, at55, ra55eq, BRS, FRS, ERS, miles, fromMA, housingPaid};
 }
 const PLAN_F={Standard:1.0, Basic:0.9, Escalating:0.8};
+// Estimate the RA at age 55 from today's RA, by taking it back at the RA rate
+// (4% plus CPF's extra interest for 55+: 2% on the first $30k, 1% on the next $30k).
+// Contributions and MediSave overflow since 55 are not known, so the true figure may be a little lower.
+function raAt55Estimate(raNow, yrs){
+  const rate=b=>(0.04*b+0.02*Math.min(b,30000)+0.01*Math.min(Math.max(b-30000,0),30000))/Math.max(b,1);
+  let b=Math.max(0,raNow||0), t=Math.max(0,yrs||0);
+  while(t>1e-9){ const step=Math.min(1,t); let x=b; for(let i=0;i<6;i++) x=b/Math.pow(1+rate(x),step); b=x; t-=step; }
+  return b;
+}
+
 function cpfPayout(ra55eq, plan, payoutAge){
   return (ra55eq*7.53176/1000+120)*(PLAN_F[plan]||1)*(1+(payoutAge-65)*0.07);
 }
@@ -1993,25 +2006,34 @@ function App(){
     const age=ageFromDOB(s.dob);
     const byear=s.dob?new Date(s.dob).getFullYear():1976;
     const over55=age>=55;
+    let yrs55=0; if(over55&&s.dob){ const d=new Date(s.dob), b55=new Date(d.getFullYear()+55,d.getMonth(),d.getDate()); yrs55=Math.max(0,(Date.now()-b55)/(365.25*864e5)); }
+    const ra55est=over55?raAt55Estimate(s.cpfSA,yrs55):0;
     const ytr=Math.max(s.retirementAge-age,0);
     const N=Math.min(65,Math.max(30,100-age));
     const inf=s.inflation/100;
     // CPF
     const topMap={};
     const baseP={age0:age,byear,oa:s.cpfOA,sa:s.cpfSA,ma:s.cpfMA,salary:s.salary,housingMo:s.housingMo,
-      housingYrs:s.housingYrs,useFullOA:s.useFullOA,workUntil:s.retirementAge,pledge:s.cpfPledge==="Yes",endAge:95};
+      housingYrs:s.housingYrs,useFullOA:false,workUntil:s.retirementAge,pledge:s.cpfPledge==="Yes",endAge:95,ra55est:over55?ra55est:null};
     const proj=cpfProject({...baseP,topups:topMap});
     const projNoTop=Object.keys(topMap).length?cpfProject({...baseP,topups:{}}):proj;
     const interest=cpfInterest(age,s.cpfOA,s.cpfSA,s.cpfMA);
     const contrib=cpfMonthlyContrib(age,s.salary);
     const {BRS,FRS,ERS}=proj;
     const basisRA={BRS,FRS,ERS};
-    const raBasis=basisRA[s.cpfBasis]??FRS;
+    const basis=over55?(s.cpfBasis55||"ACTUAL"):s.cpfBasis;
+    // client's own RA: use the projected RA at payout age, expressed in age-55 terms for the payout formula
+    const raPay=(pr)=>{ const r=pr.rows.find(x=>x.age===s.cpfPayoutAge)||pr.rows.find(x=>x.age===Math.max(age,s.cpfPayoutAge)); return r?r.ra:pr.ra55eq*Math.pow(1.04,s.cpfPayoutAge-55); };
+    const raPayNow=raPay(proj), raPayNoTop=raPay(projNoTop);
+    const actEq=raPayNow/Math.pow(1.04,s.cpfPayoutAge-55), actEqNoTop=raPayNoTop/Math.pow(1.04,s.cpfPayoutAge-55);
+    const raBasis=basis==="ACTUAL"?actEqNoTop:(basisRA[basis]??FRS);
     const raTop=Math.max(0,proj.ra55eq-projNoTop.ra55eq);   // extra RA at 55 created by top-ups
-    const ra=Math.min(ERS,raBasis+raTop);
+    const ra=basis==="ACTUAL"?actEq:Math.min(ERS,raBasis+raTop);
+    const ersNow=cpfRS(new Date().getFullYear())[2];
+    const pledgeWithdraw=over55&&ra55est>0?Math.max(0,s.cpfSA-BRS*(s.cpfSA/ra55est)):0;
     const cpfMo=cpfPayout(ra,s.cpfPlan,s.cpfPayoutAge);
     const cpfMoNoTop=cpfPayout(raBasis,s.cpfPlan,s.cpfPayoutAge);
-    const matrix=[["BRS","Basic Retirement Sum",BRS],
+    const matrix=[...(over55?[["ACTUAL","Client's RA",actEqNoTop]]:[]),["BRS","Basic Retirement Sum",BRS],
       ["FRS","Full Retirement Sum",FRS],["ERS","Enhanced Retirement Sum",ERS]]
       .map(([key,label,amt])=>({key,label,amt,Basic:cpfPayout(amt,"Basic",s.cpfPayoutAge),
         Standard:cpfPayout(amt,"Standard",s.cpfPayoutAge),Escalating:cpfPayout(amt,"Escalating",s.cpfPayoutAge)}));
@@ -2052,7 +2074,7 @@ function App(){
     const toAge=Math.min(age+N,Math.max(age+1,s.totalsToAge));
     const tr=rows.find(r=>r.age===toAge);
     const eraReturn=tr.cumEra+tr.eraV-invested;
-    return {age,byear,over55,ytr,N,inf,rr,iy,proj,projNoTop,interest,contrib,BRS,FRS,ERS,ra,cpfMo,cpfMoNoTop,raBasis,raTop,matrix,tuTotal,tuAsked,topMap,
+    return {basis,pledgeWithdraw,raPayNow,ra55est,yrs55,ersNow,age,byear,over55,ytr,N,inf,rr,iy,proj,projNoTop,interest,contrib,BRS,FRS,ERS,ra,cpfMo,cpfMoNoTop,raBasis,raTop,matrix,tuTotal,tuAsked,topMap,
       mkt,mktAnnual,sp,mktAccum,spAccum,invested,annLife,mktTotal,unalloc,rows,requiredAtRet,iyr,ir,gap,gapStatus,viewAge,vr,toAge,tr,eraReturn};
   },[s]);
 
@@ -2124,7 +2146,7 @@ function App(){
       });
       draw.push(row);
     }
-    const matrixBars=c.matrix.map(m=>({label:m.key==="Projected"?"Your RA":m.key,key:m.key,Basic:Math.round(m.Basic),Standard:Math.round(m.Standard),Escalating:Math.round(m.Escalating)}));
+    const matrixBars=c.matrix.map(m=>({label:m.key==="ACTUAL"?"Client's RA":m.key,key:m.key,Basic:Math.round(m.Basic),Standard:Math.round(m.Standard),Escalating:Math.round(m.Escalating)}));
     const mktView=c.mkt.map(r=>({py:r.yr,age:c.age+r.yr,av:Math.round(r.av),paid:Math.round(r.paid),div:Math.round(r.cumDiv)}));
     const spView=c.sp.map(r=>({py:r.yr,age:c.age+r.yr,av:Math.round(r.av),paid:s.spAlloc,div:Math.round(r.cumDiv)}));
     let pc=0; const annView=c.rows.map(r=>{pc+=r.ann*12; return {py:r.py,age:r.age,av:Math.round(r.annV),paid:s.annAlloc*Math.min(r.py,ANN_PAY_YEARS),div:Math.round(pc)};});
@@ -2413,7 +2435,6 @@ function App(){
             <Field label="Monthly salary" sub="capped at $8,000 for CPF"><Num value={s.salary} onChange={upd("salary")} prefix="S$"/></Field>
             <Field label="OA used for housing loan" sub="per month"><Num value={s.housingMo} onChange={upd("housingMo")} prefix="S$"/></Field>
             <Field label="Housing loan years left"><Num value={s.housingYrs} onChange={upd("housingYrs")} suffix="yrs" max={35}/></Field>
-            <Toggle on={s.useFullOA} onClick={()=>upd("useFullOA")(!s.useFullOA)} label="Use the full monthly OA contribution for the housing loan"/>
           </div>
           {s.salary>0&&<table className="flat-table">
             <thead><tr><th className="ta-l">Account</th><th className="ta-r">Monthly contribution</th><th className="ta-r">Per year (age {c.age})</th></tr></thead>
@@ -2504,10 +2525,11 @@ function App(){
         <Card>
           <CardHead>Retirement Account today</CardHead>
           <div className="big-row">
-            <Big k="RA balance today" v={S(s.cpfSA,0)} sub={`Full Retirement Sum for the ${c.byear+55} cohort: ${S(c.FRS,0)}`}/>
-            <Big k="Retirement sum status" v={s.cpfSA>=c.ERS?"ERS met":s.cpfSA>=c.FRS?"FRS met":s.cpfSA>=c.BRS?"BRS met":"Below BRS"} tone={s.cpfSA>=c.FRS?"green":"claret"}/>
-            <Big k="Room to top up to ERS" v={S(Math.max(0,c.ERS-s.cpfSA),0)} sub="cash or CPF top-ups raise CPF LIFE payouts" tone="gold"/>
+            <Big k="Estimated RA at 55" v={S(c.ra55est,0)} sub={`${S(s.cpfSA,0)} today, taken back to ${c.byear+55} at RA interest`}/>
+            <Big k="Retirement sum status at 55" v={c.ra55est>=c.ERS*0.995?"ERS met":c.ra55est>=c.FRS*0.995?"FRS met":c.ra55est>=c.BRS*0.995?"BRS met":"Below BRS"} tone={c.ra55est>=c.FRS*0.995?"green":"claret"} sub={`${c.byear+55} cohort: BRS ${S(c.BRS,0)} · FRS ${S(c.FRS,0)} · ERS ${S(c.ERS,0)}`}/>
+            <Big k="Room to top up to today's ERS" v={S(Math.max(0,c.ersNow-s.cpfSA),0)} sub={`current ERS ${S(c.ersNow,0)} · cash top-ups raise CPF LIFE payouts`} tone="gold"/>
           </div>
+          <div className="note">The retirement sums are fixed for the year the client turned 55, so they are compared with what was in the RA then, not with today's balance, which includes years of interest. The RA at 55 is estimated by taking today's balance back at 4% plus CPF's extra interest; contributions and MediSave top-ups since 55 are not known, so the true amount may be a little lower. The exact top-up room is shown on the client's CPF dashboard.</div>
         </Card>)}
 
         <Card>
@@ -2538,30 +2560,30 @@ function App(){
         <Card>
           <CardHead>CPF LIFE payouts</CardHead>
           <div className="form-body">
-            <Field label="Payouts based on"><Sel value={s.cpfBasis} onChange={upd("cpfBasis")} options={[{value:"BRS",label:`BRS (${S(c.BRS,0)})`},{value:"FRS",label:`FRS (${S(c.FRS,0)})`},{value:"ERS",label:`ERS (${S(c.ERS,0)})`}]}/></Field>
+            <Field label="Payouts based on"><Sel value={c.basis} onChange={upd(c.over55?"cpfBasis55":"cpfBasis")} options={[...(c.over55?[{value:"ACTUAL",label:`Client's RA (${S(s.cpfSA,0)})`}]:[]),{value:"BRS",label:`BRS (${S(c.BRS,0)})`},{value:"FRS",label:`FRS (${S(c.FRS,0)})`},{value:"ERS",label:`ERS (${S(c.ERS,0)})`}]}/></Field>
             <Field label="CPF LIFE plan"><Sel value={s.cpfPlan} onChange={upd("cpfPlan")} options={["Standard","Basic","Escalating"]}/></Field>
             <Field label="Payouts start at"><Sel value={s.cpfPayoutAge} onChange={v=>upd("cpfPayoutAge")(parseInt(v))} options={[65,66,67,68,69,70].map(a=>({value:a,label:`Age ${a}`}))}/></Field>
-            <Field label="Property pledge"><Sel value={s.cpfPledge} onChange={upd("cpfPledge")} options={["No","Yes"]}/></Field>
+            <Toggle on={s.cpfPledge==="Yes"} onClick={()=>{const on=s.cpfPledge!=="Yes"; setS(q=>({...q,cpfPledge:on?"Yes":"No",[c.over55?"cpfBasis55":"cpfBasis"]:on?"BRS":(c.over55?"ACTUAL":"FRS")}));}} label="Property pledge (keep only the BRS in the RA)"/>
             <Toggle on={s.includeCPF} onClick={()=>upd("includeCPF")(!s.includeCPF)} label="Include CPF LIFE in the income projection"/>
           </div>
           <div className="hero-box">
             <div className="hero-key">Estimated CPF LIFE payout from age {s.cpfPayoutAge} / month</div>
             <div className="hero-val" style={{color:TXT.cpf}}>{S(c.cpfMo,0)}</div>
-            <div className="hero-sub">{s.cpfPlan} plan · {s.cpfBasis} of {S(c.ra,0)} set aside at 55{s.cpfPlan==="Escalating"?" · rises 2% every year":""}</div>
+            <div className="hero-sub">{s.cpfPlan} plan · {c.basis==="ACTUAL"?`client's RA, ${S(s.cpfSA,0)} today, projected ${S(c.raPayNow,0)} at ${s.cpfPayoutAge}`:`${c.basis} of ${S(c.ra,0)} set aside at 55`}{s.cpfPlan==="Escalating"?" · rises 2% every year":""}</div>
           </div>
           <div className="sub-head">Compare every combination · tap a cell to use it</div>
           <div className="matrix-wrap"><table className="flat-table matrix">
-            <thead><tr><th className="ta-l">Amount in RA at 55</th><th className="ta-r"><Swatch c={PLAN_C.Basic}/> Basic</th><th className="ta-r"><Swatch c={PLAN_C.Standard}/> Standard</th><th className="ta-r"><Swatch c={PLAN_C.Escalating}/> Escalating <span className="muted small">(starting)</span></th></tr></thead>
+            <thead><tr><th className="ta-l">{c.over55?"Amount in RA":"Amount in RA at 55"}</th><th className="ta-r"><Swatch c={PLAN_C.Basic}/> Basic</th><th className="ta-r"><Swatch c={PLAN_C.Standard}/> Standard</th><th className="ta-r"><Swatch c={PLAN_C.Escalating}/> Escalating <span className="muted small">(starting)</span></th></tr></thead>
             <tbody>{c.matrix.map(m=><tr key={m.key}>
-              <td><b>{m.label}</b><div className="muted small">{S(m.amt,0)}</div></td>
-              {["Basic","Standard","Escalating"].map(p=>{const on=s.cpfBasis===m.key&&s.cpfPlan===p;
-                return <td key={p} className={"ta-r mcell"+(on?" mcell-on":"")} style={on?{background:PLAN_C[p]}:null} onClick={()=>setS(q=>({...q,cpfBasis:m.key,cpfPlan:p}))}>{S(m[p],0)}</td>;})}
+              <td><b>{m.label}</b><div className="muted small">{m.key==="ACTUAL"?`about ${S(c.raPayNow,0)} at ${s.cpfPayoutAge}`:S(m.amt,0)}</div></td>
+              {["Basic","Standard","Escalating"].map(p=>{const on=c.basis===m.key&&s.cpfPlan===p;
+                return <td key={p} className={"ta-r mcell"+(on?" mcell-on":"")} style={on?{background:PLAN_C[p]}:null} onClick={()=>setS(q=>({...q,[c.over55?"cpfBasis55":"cpfBasis"]:m.key,cpfPlan:p}))}>{S(m[p],0)}</td>;})}
             </tr>)}</tbody>
           </table></div>
           <ChartKey items={[{label:"Basic",color:PLAN_C.Basic},{label:"Standard",color:PLAN_C.Standard},{label:"Escalating (starting)",color:PLAN_C.Escalating}]}/>
           <ChartBox h={260}>
             <BarChart data={viz.matrixBars} margin={{top:22,right:8,left:0,bottom:0}} barCategoryGap="22%" barGap={3}
-              onClick={e=>{ if(e&&e.activePayload&&e.activePayload[0]) upd("cpfBasis")(e.activePayload[0].payload.key); }} style={{cursor:"pointer"}}>
+              onClick={e=>{ if(e&&e.activePayload&&e.activePayload[0]) upd(c.over55?"cpfBasis55":"cpfBasis")(e.activePayload[0].payload.key); }} style={{cursor:"pointer"}}>
               <CartesianGrid stroke={FILL.grid} vertical={false}/>
               <XAxis dataKey="label" tick={{...AX,fontSize:12,fontWeight:600}} tickLine={false} axisLine={{stroke:"#D1D5DB"}}/>
               <YAxis tick={AX} tickFormatter={kfmt} tickLine={false} axisLine={false} width={48} {...yNice(mx(viz.matrixBars,r=>r.Standard)*1.08)}/>
@@ -2572,12 +2594,15 @@ function App(){
               <Bar dataKey="Escalating" fill={PLAN_C.Escalating} maxBarSize={26} shape={col} {...AN}/>
             </BarChart>
           </ChartBox>
-          {s.cpfPledge==="No"&&s.cpfBasis==="BRS"&&<div className="notice">Keeping only the BRS in the RA needs a property pledge; without one, the FRS must be set aside first.</div>}
+          {s.cpfPledge==="Yes"&&<div className="notice">{c.over55
+            ?`Property pledge on: the client keeps only the BRS (${S(c.BRS,0)} for the ${c.byear+55} cohort) in the RA and can withdraw the rest, about ${S(c.pledgeWithdraw,0)} today. CPF LIFE payouts are then based on the BRS, so they are lower.`
+            :`Property pledge on: only the BRS of ${S(c.BRS,0)} is kept in the RA at 55, so CPF LIFE pays less each month, and about ${S(c.proj.at55?c.proj.at55.withdrawable:0,0)} can be withdrawn as cash at 55. Without a pledge, the FRS of ${S(c.FRS,0)} must be set aside first.`}</div>}
+          {s.cpfPledge==="No"&&c.basis==="BRS"&&<div className="notice">Keeping only the BRS in the RA needs a property pledge; without one, the FRS must be set aside first.</div>}
         </Card>
 
         <Card>
           <CardHead>How the RA is drawn down to $0</CardHead>
-          <div className="chart-sub">The {s.cpfBasis} of {S(c.ra,0)} set aside at 55 keeps earning 4% until payouts start at {s.cpfPayoutAge}. After that, every plan draws the balance down until it reaches $0. Whatever is left before then goes to the client's beneficiaries. <b>No matter which plan is chosen, the balance ends at $0, and CPF LIFE keeps paying for life after that.</b></div>
+          <div className="chart-sub">{c.basis==="ACTUAL"?`The client's RA, about ${S(c.ra,0)} in age-55 terms,`:`The ${c.basis} of ${S(c.ra,0)} set aside at 55`} keeps earning 4% until payouts start at {s.cpfPayoutAge}. After that, every plan draws the balance down until it reaches $0. Whatever is left before then goes to the client's beneficiaries. <b>No matter which plan is chosen, the balance ends at $0, and CPF LIFE keeps paying for life after that.</b></div>
           <ChartKey items={[{label:`Basic plan${viz.zero.Basic?` · $0 at ${viz.zero.Basic}`:""}`,color:PLAN_C.Basic,line:true},{label:`Standard plan${viz.zero.Standard?` · $0 at ${viz.zero.Standard}`:""}`,color:PLAN_C.Standard,line:true},{label:`Escalating plan${viz.zero.Escalating?` · $0 at ${viz.zero.Escalating}`:""}`,color:PLAN_C.Escalating,line:true}]}/>
           <ChartBox h={300}>
             <LineChart data={viz.draw} margin={{top:22,right:16,left:0,bottom:0}}>
@@ -2973,6 +2998,9 @@ function App(){
         {inc.passive&&<div className="rpt-page">{pagePassive(true)}</div>}
         {inc.waiting&&<div className="rpt-page">{pageWaiting()}</div>}
         {inc.overview&&<div className="rpt-page">{pageOverview()}</div>}
+        <div className="rpt-disclaimer">
+          <b>Important information.</b> This report shows projections only and does not constitute financial advice. Raphael Kang is not a CPF Board staff member, and this is not an official CPF statement or quotation. All figures shown, including CPF balances, retirement sums and CPF LIFE payouts, are estimates based on the information provided and the assumptions stated, and actual outcomes may differ. For official figures, please refer to the CPF Board website and the CPF LIFE Payout Estimator.
+        </div>
       </>}
 
       {(()=>{ const order=navGroups.flatMap(g=>g[1]); const i=order.findIndex(x=>x[0]===tab);
